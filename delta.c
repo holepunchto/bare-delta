@@ -30,6 +30,10 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
+#include <compact.h>
+
+#include <simdle.h>
 
 /* Remove the INTERFACE macro - Fossil uses this for its build system */
 #define INTERFACE
@@ -37,6 +41,28 @@
 /* Forward declare the memory functions */
 void* fossil_malloc(size_t size);
 void fossil_free(void* ptr);
+
+/* Implementation of fossil memory functions */
+void* fossil_malloc(size_t size) {
+  return malloc(size);
+}
+
+void fossil_free(void* ptr) {
+  if (ptr) {
+    free(ptr);
+  }
+}
+
+/* Forward declaration for the configurable delta_create */
+int delta_create_with_options(
+  const char *zSrc,
+  size_t lenSrc,
+  const char *zOut,
+  size_t lenOut,
+  char *zDelta,
+  int nhash,
+  int searchLimit
+);
 
 /*
 ** Macros for turning debugging printfs on and off
@@ -75,44 +101,72 @@ typedef short int s16;
 typedef unsigned short int u16;
 
 /*
-** The width of a hash window in bytes.  The algorithm only works if this
+** The default width of a hash window in bytes.  The algorithm only works if this
 ** is a power of 2.
 */
-#define NHASH 16
+#define NHASH_DEFAULT 16
+
+/*
+** Default search depth limit for hash collisions
+*/
+#define SEARCH_LIMIT_DEFAULT 64
 
 /*
 ** The current state of the rolling hash.
 **
 ** z[] holds the values that have been hashed.  z[] is a circular buffer.
-** z[i] is the first entry and z[(i+NHASH-1)%NHASH] is the last entry of
+** z[i] is the first entry and z[(i+nhash-1)%nhash] is the last entry of
 ** the window.
 **
 ** Hash.a is the sum of all elements of hash.z[].  Hash.b is a weighted
-** sum.  Hash.b is z[i]*NHASH + z[i+1]*(NHASH-1) + ... + z[i+NHASH-1]*1.
-** (Each index for z[] should be module NHASH, of course.  The %NHASH operator
+** sum.  Hash.b is z[i]*nhash + z[i+1]*(nhash-1) + ... + z[i+nhash-1]*1.
+** (Each index for z[] should be module nhash, of course.  The %nhash operator
 ** is omitted in the prior expression for brevity.)
 */
 typedef struct hash hash;
 struct hash {
   u16 a, b;         /* Hash values */
   u16 i;            /* Start of the hash window */
-  char z[NHASH];    /* The values that have been hashed */
+  u16 nhash;        /* Hash window size */
+  char *z;          /* The values that have been hashed (allocated) */
 };
 
 /*
-** Initialize the rolling hash using the first NHASH characters of z[]
+** Initialize the rolling hash using the first nhash characters of z[]
+** For small hash windows, use stack allocation to avoid malloc overhead
 */
-static void hash_init(hash *pHash, const char *z){
+static void hash_init(hash *pHash, const char *z, int nhash){
   u16 a, b, i;
+  pHash->nhash = nhash;
+  
+  // Use stack buffer for small hash windows to avoid malloc overhead
+  if (nhash <= 32) {
+    static __thread char stack_buffer[64];  // Thread-local stack buffer
+    pHash->z = stack_buffer;
+  } else {
+    pHash->z = (char *)fossil_malloc(nhash);
+  }
+  
   a = b = z[0];
-  for(i=1; i<NHASH; i++){
+  for(i=1; i<nhash; i++){
     a += z[i];
     b += a;
   }
-  memcpy(pHash->z, z, NHASH);
+  memcpy(pHash->z, z, nhash);
   pHash->a = a & 0xffff;
   pHash->b = b & 0xffff;
   pHash->i = 0;
+}
+
+/*
+** Free the rolling hash - only free heap-allocated buffers
+*/
+static void hash_free(hash *pHash){
+  if(pHash->z && pHash->nhash > 32){
+    // Only free if we used heap allocation (nhash > 32)
+    fossil_free(pHash->z);
+    pHash->z = 0;
+  }
 }
 
 /*
@@ -121,9 +175,9 @@ static void hash_init(hash *pHash, const char *z){
 static void hash_next(hash *pHash, int c){
   u16 old = pHash->z[pHash->i];
   pHash->z[pHash->i] = c;
-  pHash->i = (pHash->i+1)&(NHASH-1);
+  pHash->i = (pHash->i+1) % pHash->nhash;
   pHash->a = pHash->a - old + c;
-  pHash->b = pHash->b - NHASH*old + pHash->a;
+  pHash->b = pHash->b - pHash->nhash*old + pHash->a;
 }
 
 /*
@@ -134,17 +188,17 @@ static u32 hash_32bit(hash *pHash){
 }
 
 /*
-** Compute a hash on NHASH bytes.
+** Compute a hash on nhash bytes.
 **
 ** This routine is intended to be equivalent to:
 **    hash h;
-**    hash_init(&h, zInput);
+**    hash_init(&h, zInput, nhash);
 **    return hash_32bit(&h);
 */
-static u32 hash_once(const char *z){
+static u32 hash_once(const char *z, int nhash){
   u16 a, b, i;
   a = b = z[0];
-  for(i=1; i<NHASH; i++){
+  for(i=1; i<nhash; i++){
     a += z[i];
     b += a;
   }
@@ -152,24 +206,45 @@ static u32 hash_once(const char *z){
 }
 
 /*
-** Write an base-64 integer into the given buffer.
+** Write a compact-encoded integer into the given buffer.
 */
-static void putInt(unsigned int v, char **pz){
-  static const char zDigits[] =
-    "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz~";
-  /*  123456789 123456789 123456789 123456789 123456789 123456789 123 */
-  int i, j;
-  char zBuf[20];
-  if( v==0 ){
-    *(*pz)++ = '0';
-    return;
-  }
-  for(i=0; v>0; i++, v>>=6){
-    zBuf[i] = zDigits[v&0x3f];
-  }
-  for(j=i-1; j>=0; j--){
-    *(*pz)++ = zBuf[j];
-  }
+static void putInt(uint32_t v, char **pz){
+  compact_state_t state;
+  uintmax_t value = v;
+  int err;
+  
+  DEBUG1( printf("putInt: encoding value %u\n", v); )
+  
+  // Initialize state for encoding
+  state.start = 0;
+  state.end = 0;
+  state.buffer = (uint8_t*)*pz;
+  
+  // Pre-encode to calculate space needed
+  err = compact_preencode_uint(&state, value);
+  assert(err == 0);
+  size_t needed = state.end;
+  
+  DEBUG1( printf("putInt: need %zu bytes for value %u\n", needed, v); )
+  
+  // Reset for actual encoding
+  state.start = 0;
+  state.end = needed;
+  
+  // Encode the integer using compact format
+  err = compact_encode_uint(&state, value);
+  assert(err == 0);
+  
+  DEBUG1( 
+    printf("putInt: encoded %u as bytes: ", v);
+    for(size_t i = 0; i < state.start; i++) {
+      printf("0x%02x ", state.buffer[i]);
+    }
+    printf("\n");
+  )
+  
+  // Update pointer to end of encoded data
+  *pz = (char*)(state.buffer + state.start);
 }
 
 /*
@@ -178,39 +253,126 @@ static void putInt(unsigned int v, char **pz){
 ** the integer.  The *pLen parameter holds the length of the string
 ** in *pz and is decremented once for each character in the integer.
 */
-static unsigned int getInt(const char **pz, int *pLen){
-  static const signed char zValue[] = {
-    -1, -1, -1, -1, -1, -1, -1, -1,   -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1,   -1, -1, -1, -1, -1, -1, -1, -1,
-    -1, -1, -1, -1, -1, -1, -1, -1,   -1, -1, -1, -1, -1, -1, -1, -1,
-     0,  1,  2,  3,  4,  5,  6,  7,    8,  9, -1, -1, -1, -1, -1, -1,
-    -1, 10, 11, 12, 13, 14, 15, 16,   17, 18, 19, 20, 21, 22, 23, 24,
-    25, 26, 27, 28, 29, 30, 31, 32,   33, 34, 35, -1, -1, -1, -1, 36,
-    -1, 37, 38, 39, 40, 41, 42, 43,   44, 45, 46, 47, 48, 49, 50, 51,
-    52, 53, 54, 55, 56, 57, 58, 59,   60, 61, 62, -1, -1, -1, 63, -1,
-  };
-  unsigned int v = 0;
-  int c;
-  unsigned char *z = (unsigned char*)*pz;
-  unsigned char *zStart = z;
-  while( (c = zValue[0x7f&*(z++)])>=0 ){
-     v = (v<<6) + c;
+static uint32_t getInt(const char **pz, size_t *pLen){
+  compact_state_t state;
+  uintmax_t result;
+  int err;
+  
+  DEBUG1( 
+    printf("getInt: decoding from %zu bytes: ", *pLen);
+    for(size_t i = 0; i < (*pLen < 10 ? *pLen : 10); i++) {
+      printf("0x%02x ", (uint8_t)(*pz)[i]);
+    }
+    printf("\n");
+  )
+  
+  // Initialize state for decoding
+  state.start = 0;
+  state.end = *pLen;
+  state.buffer = (uint8_t*)*pz;
+  
+  DEBUG1( printf("getInt: before decode - state.start=%zu, state.end=%zu\n", state.start, state.end); )
+  
+  // Decode the integer using compact format
+  err = compact_decode_uint(&state, &result);
+  
+  DEBUG1( printf("getInt: after decode - err=%d, state.start=%zu, result=%ju\n", err, state.start, result); )
+  
+  if (err != 0) {
+    // Decoding failed - return error indication
+    DEBUG1( printf("getInt: decode failed with error %d\n", err); )
+    return UINT32_MAX;
   }
-  z--;
-  *pLen -= z - zStart;
-  *pz = (char*)z;
-  return v;
+  
+  // Check for overflow - we only support 32-bit values
+  if (result > UINT32_MAX) {
+    DEBUG1( printf("getInt: value %ju exceeds UINT32_MAX\n", result); )
+    return UINT32_MAX;
+  }
+  
+  // Update pointer and remaining length
+  size_t consumed = state.start;
+  DEBUG1( printf("getInt: decoded value %u, consumed %zu bytes, new pLen will be %zu\n", (uint32_t)result, consumed, *pLen - consumed); )
+  
+  *pz += consumed;
+  *pLen -= consumed;
+  
+  DEBUG1( printf("getInt: updated pointers - new *pz points to 0x%02x, *pLen=%zu\n", 
+                 *pLen > 0 ? (uint8_t)(*pz)[0] : 0x00, *pLen); )
+  
+  return (uint32_t)result;
 }
 
 /*
-** Return the number digits in the base-64 representation of a positive integer
+** Return the number of bytes needed for compact encoding of a positive integer
 */
-static int digit_count(int v){
-  unsigned int i;
-  int x;
-  for(i=1, x=64; v>=x; i++, x <<= 6){}
-  return i;
+static int compact_size(uint32_t v){
+  if (v <= 0xfc) return 1;
+  if (v <= 0xffff) return 3;
+  if (v <= 0xffffffff) return 5;
+  return 9;
 }
+
+/*
+** SIMD-optimized forward match extension using libsimdle.
+** Returns the number of matching bytes starting from the given positions.
+*/
+static int match_forward(const char *src, const char *tgt, int maxLen) {
+  int matched = 0;
+  const char *srcEnd = src + maxLen;
+  
+  // Use libsimdle for 16-byte SIMD comparisons
+  while (src + 16 <= srcEnd) {
+    simdle_v128_t s_vec = simdle_load_v128_u8((const uint8_t*)src);
+    simdle_v128_t t_vec = simdle_load_v128_u8((const uint8_t*)tgt);
+    simdle_v128_t xor_result = simdle_xor_v128_u8(s_vec, t_vec);
+    
+    // Check if all bytes are zero (meaning all bytes match)
+    uint64_t combined = xor_result.u64[0] | xor_result.u64[1];
+    if (combined != 0) {
+      // Found mismatch, use fast bit operations to find first differing byte
+      if (xor_result.u64[0] != 0) {
+        // Mismatch in first 8 bytes
+        int byte_pos = __builtin_ctzll(xor_result.u64[0]) / 8;
+        return matched + byte_pos;
+      } else {
+        // Mismatch in second 8 bytes  
+        int byte_pos = __builtin_ctzll(xor_result.u64[1]) / 8;
+        return matched + 8 + byte_pos;
+      }
+    }
+    
+    matched += 16;
+    src += 16;
+    tgt += 16;
+  }
+  
+  // Handle remaining bytes  
+  while (src < srcEnd && *src == *tgt) {
+    matched++;
+    src++;
+    tgt++;
+  }
+  
+  return matched;
+}
+
+/*
+** SIMD-optimized backward match extension.
+** Returns the number of matching bytes extending backwards from the given positions.
+*/
+static int match_backward(const char *src, const char *tgt, int maxLen) {
+  int matched = 0;
+  
+  // Simple approach for backward matching - work backwards byte by byte
+  // Could be optimized further with reverse SIMD, but complexity vs benefit
+  while (matched < maxLen && src[-matched-1] == tgt[-matched-1]) {
+    matched++;
+  }
+  
+  return matched;
+}
+
 
 #ifdef __GNUC__
 # define GCC_VERSION (__GNUC__*1000000+__GNUC_MINOR__*1000+__GNUC_PATCHLEVEL__)
@@ -294,10 +456,10 @@ static unsigned int checksum(const char *zIn, size_t N){
 **
 ** Output Format:
 **
-** The delta begins with a base64 number followed by a newline.  This
+** The delta begins with a compact-encoded integer.  This
 ** number is the number of bytes in the TARGET file.  Thus, given a
 ** delta file z, a program can compute the size of the output file
-** simply by reading the first line and decoding the base-64 number
+** simply by decoding the compact integer
 ** found there.  The delta_output_size() routine does exactly this.
 **
 ** After the initial size number, the delta consists of a series of
@@ -307,12 +469,12 @@ static unsigned int checksum(const char *zIn, size_t N){
 **     NNN@MMM,
 **
 ** where NNN is the number of bytes to be copied and MMM is the offset
-** into the source file of the first byte (both base-64).   If NNN is 0
+** into the source file of the first byte (both compact-encoded integers).   If NNN is 0
 ** it means copy the rest of the input file.  Literal text is like this:
 **
 **     NNN:TTTTT
 **
-** where NNN is the number of bytes of text (base-64) and TTTTT is the text.
+** where NNN is the number of bytes of text (compact-encoded) and TTTTT is the text.
 **
 ** The last term is of the form
 **
@@ -320,7 +482,7 @@ static unsigned int checksum(const char *zIn, size_t N){
 **
 ** In this case, NNN is a 32-bit bigendian checksum of the output file
 ** that can be used to verify that the delta applied correctly.  All
-** numbers are in base-64.
+** numbers are compact-encoded.
 **
 ** Pure text files generate a pure text delta.  Binary files generate a
 ** delta that may contain some binary data.
@@ -345,10 +507,23 @@ static unsigned int checksum(const char *zIn, size_t N){
 */
 int delta_create(
   const char *zSrc,      /* The source or pattern file */
-  unsigned int lenSrc,   /* Length of the source file */
+  size_t lenSrc,         /* Length of the source file */
   const char *zOut,      /* The target file */
-  unsigned int lenOut,   /* Length of the target file */
+  size_t lenOut,         /* Length of the target file */
   char *zDelta           /* Write the delta into this buffer */
+){
+  return delta_create_with_options(zSrc, lenSrc, zOut, lenOut, zDelta, 
+                                   NHASH_DEFAULT, SEARCH_LIMIT_DEFAULT);
+}
+
+int delta_create_with_options(
+  const char *zSrc,      /* The source or pattern file */
+  size_t lenSrc,         /* Length of the source file */
+  const char *zOut,      /* The target file */
+  size_t lenOut,         /* Length of the target file */
+  char *zDelta,          /* Write the delta into this buffer */
+  int nhash,             /* Hash window size (must be power of 2) */
+  int searchLimit        /* Search depth limit */
 ){
   int i, base;
   char *zOrigDelta = zDelta;
@@ -361,13 +536,12 @@ int delta_create(
   /* Add the target file size to the beginning of the delta
   */
   putInt(lenOut, &zDelta);
-  *(zDelta++) = '\n';
 
   /* If the source file is very small, it means that we have no
   ** chance of ever doing a copy command.  Just output a single
   ** literal segment for the entire target and exit.
   */
-  if( lenSrc<=NHASH ){
+  if( lenSrc<=nhash ){
     putInt(lenOut, &zDelta);
     *(zDelta++) = ':';
     memcpy(zDelta, zOut, lenOut);
@@ -380,29 +554,29 @@ int delta_create(
   /* Compute the hash table used to locate matching sections in the
   ** source file.
   */
-  nHash = lenSrc/NHASH;
+  nHash = lenSrc/nhash;
   collide = fossil_malloc( nHash*2*sizeof(int) );
   memset(collide, -1, nHash*2*sizeof(int));
   landmark = &collide[nHash];
-  for(i=0; i<(int)lenSrc-NHASH; i+=NHASH){
-    int hv = hash_once(&zSrc[i]) % nHash;
-    collide[i/NHASH] = landmark[hv];
-    landmark[hv] = i/NHASH;
+  for(i=0; i<(int)lenSrc-nhash; i+=nhash){
+    int hv = hash_once(&zSrc[i], nhash) % nHash;
+    collide[i/nhash] = landmark[hv];
+    landmark[hv] = i/nhash;
   }
 
   /* Begin scanning the target file and generating copy commands and
   ** literal sections of the delta.
   */
   base = 0;    /* We have already generated everything before zOut[base] */
-  while( base+NHASH<(int)lenOut ){
+  while( base+nhash<(int)lenOut ){
     int iSrc, iBlock;
     unsigned int bestCnt, bestOfst=0, bestLitsz=0;
-    hash_init(&h, &zOut[base]);
+    hash_init(&h, &zOut[base], nhash);
     i = 0;     /* Trying to match a landmark against zOut[base+i] */
     bestCnt = 0;
     while( 1 ){
       int hv;
-      int limit = 250;
+      int limit = searchLimit;
 
       hv = hash_32bit(&h) % nHash;
       DEBUG2( printf("LOOKING: %4d [%s]\n", base+i, print16(&zOut[base+i])); )
@@ -428,32 +602,38 @@ int delta_create(
         int sz;
         int limitX;
 
-        /* Beginning at iSrc, match forwards as far as we can.  j counts
-        ** the number of characters that match */
-        iSrc = iBlock*NHASH;
+        /* Get candidate source position from hash table */
+        iSrc = iBlock*nhash;
         y = base+i;
-        limitX = ( lenSrc-iSrc <= lenOut-y ) ? lenSrc : iSrc + lenOut - y;
-        for(x=iSrc; x<limitX; x++, y++){
-          if( zSrc[x]!=zOut[y] ) break;
+        
+        /* FIRST: Verify the hash window actually matches (eliminate hash collisions) */
+        if (memcmp(&zSrc[iSrc], &zOut[y], nhash) != 0) {
+          /* Hash collision - skip this block */
+          iBlock = collide[iBlock];
+          continue;
         }
-        j = x - iSrc - 1;
-
-        /* Beginning at iSrc-1, match backwards as far as we can.  k counts
-        ** the number of characters that match */
-        for(k=1; k<iSrc && k<=i; k++){
-          if( zSrc[iSrc-k]!=zOut[base+i-k] ) break;
-        }
-        k--;
-
-        /* Compute the offset and size of the matching region */
-        ofst = iSrc-k;
-        cnt = j+k+1;
-        litsz = i-k;  /* Number of bytes of literal text before the copy */
+        
+        /* SECOND: Extend forward from END of verified hash window */
+        int forward_start_src = iSrc + nhash;
+        int forward_start_tgt = y + nhash;
+        int max_forward = (lenSrc - forward_start_src < lenOut - forward_start_tgt) 
+                         ? lenSrc - forward_start_src 
+                         : lenOut - forward_start_tgt;
+        j = (max_forward > 0) ? match_forward(&zSrc[forward_start_src], &zOut[forward_start_tgt], max_forward) : 0;
+        
+        /* THIRD: Extend backward from START of verified hash window */
+        int max_backward = (iSrc < i) ? iSrc : i;
+        k = (max_backward > 0) ? match_backward(&zSrc[iSrc], &zOut[y], max_backward) : 0;
+        
+        /* FOURTH: Compute final match region (now guaranteed correct) */
+        ofst = iSrc - k;
+        cnt = k + nhash + j;  /* backward + verified_window + forward */
+        litsz = i - k;  /* Number of bytes of literal text before the copy */
         DEBUG2( printf("MATCH %d bytes at %d: [%s] litsz=%d\n",
                         cnt, ofst, print16(&zSrc[ofst]), litsz); )
         /* sz will hold the number of bytes needed to encode the "insert"
         ** command and the copy command, not counting the "insert" text */
-        sz = digit_count(i-k)+digit_count(cnt)+digit_count(ofst)+3;
+        sz = compact_size(i-k)+compact_size(cnt)+compact_size(ofst)+3;
         if( cnt>=sz && cnt>(int)bestCnt ){
           /* Remember this match only if it is the best so far and it
           ** does not increase the file size */
@@ -495,7 +675,7 @@ int delta_create(
       }
 
       /* If we reach this point, it means no match is found so far */
-      if( base+i+NHASH>=(int)lenOut ){
+      if( base+i+nhash>=(int)lenOut ){
         /* We have reached the end of the file and have not found any
         ** matches.  Do an "insert" for everything that does not match */
         putInt(lenOut-base, &zDelta);
@@ -507,10 +687,13 @@ int delta_create(
       }
 
       /* Advance the hash by one character.  Keep looking for a match */
-      hash_next(&h, zOut[base+i+NHASH]);
+      hash_next(&h, zOut[base+i+nhash]);
       i++;
     }
   }
+  
+  /* Clean up hash */
+  hash_free(&h);
   /* Output a final "insert" record to get all the text at the end of
   ** the file that does not match anything in the source file.
   */
@@ -536,14 +719,14 @@ int delta_create(
 ** for the output and hence allocate nor more space that is really
 ** needed.
 */
-int delta_output_size(const char *zDelta, int lenDelta){
-  int size;
+int delta_output_size(const char *zDelta, size_t lenDelta){
+  uint32_t size;
   size = getInt(&zDelta, &lenDelta);
-  if( *zDelta!='\n' ){
-    /* ERROR: size integer not terminated by "\n" */
+  if( size == UINT32_MAX ){
+    /* ERROR: failed to decode size integer */
     return -1;
   }
-  return size;
+  return (int)size;
 }
 
 
@@ -569,26 +752,39 @@ int delta_output_size(const char *zDelta, int lenDelta){
 */
 int delta_apply(
   const char *zSrc,      /* The source or pattern file */
-  int lenSrc,            /* Length of the source file */
+  size_t lenSrc,         /* Length of the source file */
   const char *zDelta,    /* Delta to apply to the pattern */
-  int lenDelta,          /* Length of the delta */
+  size_t lenDelta,       /* Length of the delta */
   char *zOut             /* Write the output into this preallocated buffer */
 ){
-  unsigned int limit;
-  unsigned int total = 0;
+  uint32_t limit;
+  uint32_t total = 0;
 #ifdef FOSSIL_ENABLE_DELTA_CKSUM_TEST
   char *zOrigOut = zOut;
 #endif
 
   limit = getInt(&zDelta, &lenDelta);
-  if( *zDelta!='\n' ){
-    /* ERROR: size integer not terminated by "\n" */
+  if( limit == UINT32_MAX ){
+    /* ERROR: failed to decode size integer */
+    DEBUG1( printf("delta_apply: ERROR - failed to decode target size\n"); )
     return -1;
   }
-  zDelta++; lenDelta--;
-  while( *zDelta && lenDelta>0 ){
-    unsigned int cnt, ofst;
+  DEBUG1( printf("delta_apply: target size = %u, remaining delta = %zu bytes\n", limit, lenDelta); )
+  while( lenDelta>0 ){
+    uint32_t cnt, ofst;
+    
+    DEBUG1( printf("delta_apply: loop iteration, %zu bytes remaining, first byte = 0x%02x\n", lenDelta, (uint8_t)*zDelta); )
+    
     cnt = getInt(&zDelta, &lenDelta);
+    
+    if (cnt == UINT32_MAX) {
+      DEBUG1( printf("delta_apply: ERROR - failed to decode operation count\n"); )
+      return -1;
+    }
+    
+    DEBUG1( printf("delta_apply: operation count = %u, next char = 0x%02x ('%c')\n", 
+                   cnt, (uint8_t)zDelta[0], zDelta[0] >= 32 && zDelta[0] <= 126 ? zDelta[0] : '?'); )
+    
     switch( zDelta[0] ){
       case '@': {
         zDelta++; lenDelta--;
@@ -617,17 +813,22 @@ int delta_apply(
         total += cnt;
         if( total>limit ){
           /* ERROR:  insert command gives an output larger than predicted */
+          DEBUG1( printf("delta_apply: ERROR - insert would exceed limit (%u > %u)\n", total, limit); )
           return -1;
         }
-        DEBUG1( printf("INSERT %d\n", cnt); )
+        DEBUG1( printf("delta_apply: INSERT %u bytes (total now %u/%u)\n", cnt, total, limit); )
         if( (int)cnt>lenDelta ){
           /* ERROR: insert count exceeds size of delta */
+          DEBUG1( printf("delta_apply: ERROR - insert count %u exceeds remaining delta %zu\n", cnt, lenDelta); )
           return -1;
         }
-        memcpy(zOut, zDelta, cnt);
-        zOut += cnt;
+        if (cnt > 0) {
+          memcpy(zOut, zDelta, cnt);
+          zOut += cnt;
+        }
         zDelta += cnt;
         lenDelta -= cnt;
+        DEBUG1( printf("delta_apply: INSERT completed, %zu bytes remaining in delta\n", lenDelta); )
         break;
       }
       case ';': {
@@ -636,11 +837,13 @@ int delta_apply(
 #ifdef FOSSIL_ENABLE_DELTA_CKSUM_TEST
         if( cnt!=checksum(zOrigOut, total) ){
           /* ERROR:  bad checksum */
+          DEBUG1( printf("delta_apply: ERROR - bad checksum\n"); )
           return -1;
         }
 #endif
         if( total!=limit ){
           /* ERROR: generated size does not match predicted size */
+          DEBUG1( printf("delta_apply: ERROR - size mismatch: generated %u != predicted %u\n", total, limit); )
           return -1;
         }
         return total;
@@ -662,21 +865,20 @@ int delta_apply(
 */
 int delta_analyze(
   const char *zDelta,    /* Delta to apply to the pattern */
-  int lenDelta,          /* Length of the delta */
+  size_t lenDelta,       /* Length of the delta */
   int *pnCopy,           /* OUT: Number of bytes copied */
   int *pnInsert          /* OUT: Number of bytes inserted */
 ){
-  unsigned int nInsert = 0;
-  unsigned int nCopy = 0;
+  uint32_t nInsert = 0;
+  uint32_t nCopy = 0;
 
-  (void)getInt(&zDelta, &lenDelta);
-  if( *zDelta!='\n' ){
-    /* ERROR: size integer not terminated by "\n" */
+  uint32_t size = getInt(&zDelta, &lenDelta);
+  if( size == UINT32_MAX ){
+    /* ERROR: failed to decode size integer */
     return -1;
   }
-  zDelta++; lenDelta--;
-  while( *zDelta && lenDelta>0 ){
-    unsigned int cnt;
+  while( lenDelta>0 ){
+    uint32_t cnt;
     cnt = getInt(&zDelta, &lenDelta);
     switch( zDelta[0] ){
       case '@': {
