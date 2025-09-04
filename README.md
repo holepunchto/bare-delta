@@ -114,4 +114,4 @@ Use the sync API for better performance on small to medium files. Use the async 
 
 Apache 2.0
 
-This project incorporates code from Fossil SCM's delta compression algorithm, which is also licensed under the BSD-2-Clause License. Copyright (c) 2006 D. Richard Hipp.
+This project incorporates code from Fossil SCM's delta compression algorithm, which is licensed under the BSD-2-Clause License. Copyright (c) 2006 D. Richard Hipp.
