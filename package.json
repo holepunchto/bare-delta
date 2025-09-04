@@ -1,0 +1,40 @@
+{
+  "name": "bare-delta",
+  "version": "1.0.0",
+  "description": "Binary delta encoding/decoding for Bare",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "binding.c",
+    "binding.js",
+    "delta.c",
+    "CMakeLists.txt",
+    "prebuilds"
+  ],
+  "addon": true,
+  "scripts": {
+    "build": "bare-make generate && bare-make build && bare-make install",
+    "test": "bare test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/holepunchto/bare-delta.git"
+  },
+  "author": "Holepunch",
+  "license": "BSD-2-Clause",
+  "bugs": {
+    "url": "https://github.com/holepunchto/bare-delta/issues"
+  },
+  "homepage": "https://github.com/holepunchto/bare-delta#readme",
+  "dependencies": {
+    "b4a": "^1.6.4"
+  },
+  "devDependencies": {
+    "brittle": "^3.4.0",
+    "cmake-bare": "^1.1.2"
+  }
+}
