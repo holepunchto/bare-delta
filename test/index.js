@@ -344,7 +344,6 @@ test('memory safety - concurrent operations with shared data', async (t) => {
   const source = generateTestData(8192, 'text')
   const target = mutateData(source, 'point', 0.1)
   
-  // CRITICAL DEBUG: Start with minimal concurrency to isolate the hang
   const operations = []
   for (let i = 0; i < 2; i++) {
     operations.push(delta.create(source, target))

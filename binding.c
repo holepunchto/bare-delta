@@ -48,7 +48,8 @@ extract_buffer(js_env_t *env, js_value_t *value, void **data, size_t *len, const
     return -1;
   }
   
-  return js_get_typedarray_info(env, value, NULL, data, len, NULL, NULL);
+  int result = js_get_typedarray_info(env, value, NULL, data, len, NULL, NULL);
+  return result;
 }
 
 // Parse delta options from JavaScript object
@@ -489,6 +490,7 @@ bare_delta_create_sync(js_env_t *env, js_callback_info_t *info) {
   js_value_t *argv[3];
   err = js_get_callback_info(env, info, &argc, argv, NULL, NULL);
   assert(err == 0);
+  
   
   if (argc < 2) {
     js_throw_error(env, NULL, "delta.createSync requires at least 2 arguments (source, target[, options])");

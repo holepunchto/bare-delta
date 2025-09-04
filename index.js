@@ -51,7 +51,8 @@ async function apply(source, delta, options = {}) {
  * @returns {Uint8Array} The delta buffer
  */
 function createSync(source, target, options = {}) {
-  return b4a.toBuffer(binding.createSync(source, target, options))
+  const result = binding.createSync(source, target, options);
+  return b4a.toBuffer(result);
 }
 
 /**

@@ -26,6 +26,7 @@ target_sources(
     binding.c
     delta.c
     ${libcompact_sources}
+    ${libsimdle_source}/src/extern.c
     ${zstd_common_sources}
     ${zstd_compress_sources}
     ${zstd_decompress_sources}

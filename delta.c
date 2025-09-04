@@ -321,6 +321,7 @@ static int match_forward(const char *src, const char *tgt, int maxLen) {
   int matched = 0;
   const char *srcEnd = src + maxLen;
   
+  
   // Use libsimdle for 16-byte SIMD comparisons
   while (src + 16 <= srcEnd) {
     simdle_v128_t s_vec = simdle_load_v128_u8((const uint8_t*)src);
@@ -328,17 +329,12 @@ static int match_forward(const char *src, const char *tgt, int maxLen) {
     simdle_v128_t xor_result = simdle_xor_v128_u8(s_vec, t_vec);
     
     // Check if all bytes are zero (meaning all bytes match)
-    uint64_t combined = xor_result.u64[0] | xor_result.u64[1];
-    if (combined != 0) {
-      // Found mismatch, use fast bit operations to find first differing byte
-      if (xor_result.u64[0] != 0) {
-        // Mismatch in first 8 bytes
-        int byte_pos = __builtin_ctzll(xor_result.u64[0]) / 8;
-        return matched + byte_pos;
-      } else {
-        // Mismatch in second 8 bytes  
-        int byte_pos = __builtin_ctzll(xor_result.u64[1]) / 8;
-        return matched + 8 + byte_pos;
+    if (!simdle_allz_v128(xor_result)) {
+      // Found mismatch, scan byte by byte to find first differing position
+      for (int i = 0; i < 16; i++) {
+        if (xor_result.u8[i] != 0) {
+          return matched + i;
+        }
       }
     }
     
