@@ -1,6 +1,6 @@
 {
   "name": "bare-delta",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Binary patch handling for Bare",
   "main": "index.js",
   "exports": {
