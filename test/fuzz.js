@@ -100,11 +100,11 @@ async function fuzzIteration (rng, iteration) {
     if (config.async) {
       // Test async operations
       delta = await create(original, modified, config.compressed ? { compressed: true } : {})
-      result = await apply(original, delta, config.compressed ? { compressed: true } : {})
+      result = await apply(original, delta)
     } else {
       // Test sync operations
       delta = createSync(original, modified, config.compressed ? { compressed: true } : {})
-      result = applySync(original, delta, config.compressed ? { compressed: true } : {})
+      result = applySync(original, delta)
     }
     
     const endTime = process.hrtime.bigint()

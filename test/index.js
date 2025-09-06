@@ -496,8 +496,8 @@ test('compression - sync create and apply with compression', (t) => {
   t.ok(compressedDelta.length > 0, 'compressed delta has content')
   t.ok(compressedDelta.length < uncompressedDelta.length, 'compressed delta is smaller')
   
-  // Apply compressed delta
-  const result = delta.applySync(source, compressedDelta, { compressed: true })
+  // Apply compressed delta (auto-detected)
+  const result = delta.applySync(source, compressedDelta)
   t.alike(result, target, 'compressed delta produces correct target')
 })
 
@@ -514,8 +514,8 @@ test('compression - async create and apply with compression', async (t) => {
   t.ok(compressedDelta.length > 0, 'async compressed delta has content')
   t.ok(compressedDelta.length < uncompressedDelta.length, 'async compressed delta is smaller')
 
-  // Apply compressed delta
-  const result = await delta.apply(source, compressedDelta, { compressed: true })
+  // Apply compressed delta (auto-detected)
+  const result = await delta.apply(source, compressedDelta)
   t.alike(result, target, 'async compressed delta produces correct target')
 })
 
@@ -528,8 +528,8 @@ test('compression - mixed sync and async compression operations', async (t) => {
   const asyncCompressed = await delta.create(source, target, { compressed: true })
 
   // Apply both ways
-  const syncResult = delta.applySync(source, asyncCompressed, { compressed: true })
-  const asyncResult = await delta.apply(source, syncCompressed, { compressed: true })
+  const syncResult = delta.applySync(source, asyncCompressed)
+  const asyncResult = await delta.apply(source, syncCompressed)
 
   t.alike(syncResult, target, 'sync apply of async compressed delta works')
   t.alike(asyncResult, target, 'async apply of sync compressed delta works')
@@ -554,7 +554,7 @@ test('compression - compression works on different data types', async (t) => {
       t.ok(compressed.length <= uncompressed.length, `${dataType} compressed delta is not larger than uncompressed`)
     }
     
-    const result = await delta.apply(source, compressed, { compressed: true })
+    const result = await delta.apply(source, compressed)
     t.alike(result, target, `${dataType} compressed data applies correctly`)
   }
 })
@@ -570,26 +570,81 @@ test('compression - large file compression', async (t) => {
   t.ok(compressed.length > 0, 'large file compressed delta has content')
   t.ok(compressed.length < uncompressed.length, 'large file compressed delta is smaller')
 
-  const result = await delta.apply(source, compressed, { compressed: true })
+  const result = await delta.apply(source, compressed)
   t.alike(result, target, 'large file compressed delta applies correctly')
 })
 
-test('compression - error handling with invalid compressed data', async (t) => {
+test('compression - automatic detection of compressed deltas', async (t) => {
+  const source = b4a.from('Hello world! '.repeat(100))
+  const target = b4a.from('Hello Bare world! '.repeat(100))
+  
+  // Create both compressed and uncompressed deltas
+  const compressedDelta = await delta.create(source, target, { compressed: true })
+  const uncompressedDelta = await delta.create(source, target, { compressed: false })
+  
+  // Verify compressed delta has zstd magic number
+  t.ok(compressedDelta.length >= 4, 'compressed delta is at least 4 bytes')
+  t.ok(compressedDelta[0] === 0x28 && compressedDelta[1] === 0xB5 && 
+       compressedDelta[2] === 0x2F && compressedDelta[3] === 0xFD, 
+       'compressed delta has zstd magic number')
+  
+  // Apply both without specifying compression - should auto-detect
+  const resultFromCompressed = await delta.apply(source, compressedDelta)
+  const resultFromUncompressed = await delta.apply(source, uncompressedDelta)
+  
+  t.alike(resultFromCompressed, target, 'auto-detected compressed delta applies correctly')
+  t.alike(resultFromUncompressed, target, 'uncompressed delta applies correctly')
+  
+  // Test sync versions
+  const syncResultCompressed = delta.applySync(source, compressedDelta)
+  const syncResultUncompressed = delta.applySync(source, uncompressedDelta)
+  
+  t.alike(syncResultCompressed, target, 'sync auto-detected compressed delta applies correctly')
+  t.alike(syncResultUncompressed, target, 'sync uncompressed delta applies correctly')
+})
+
+test('compression - error handling with zstd magic but invalid data', async (t) => {
   const source = generateTestData(1024, 'binary')
-  const invalidCompressed = b4a.from([0x1, 0x2, 0x3, 0x4]) // Invalid zstd data
+  // Create invalid data with correct zstd magic number
+  const invalidWithMagic = b4a.from([
+    0x28, 0xB5, 0x2F, 0xFD,  // Correct zstd magic number
+    0xFF, 0xFF, 0xFF, 0xFF,  // Invalid frame header
+    0x00, 0x00, 0x00, 0x00   // Invalid data
+  ])
 
   try {
-    await delta.apply(source, invalidCompressed, { compressed: true })
-    t.fail('should throw error for invalid compressed data')
+    await delta.apply(source, invalidWithMagic)
+    t.fail('should throw error for invalid compressed data with magic number')
   } catch (err) {
-    t.ok(err instanceof Error, 'throws error for invalid compressed data')
+    t.ok(err instanceof Error, 'throws error for corrupt data with zstd magic number (async)')
   }
 
   try {
-    delta.applySync(source, invalidCompressed, { compressed: true })
-    t.fail('should throw error for invalid compressed data (sync)')
+    delta.applySync(source, invalidWithMagic)
+    t.fail('should throw error for invalid compressed data with magic number (sync)')
   } catch (err) {
-    t.ok(err instanceof Error, 'throws error for invalid compressed data (sync)')
+    t.ok(err instanceof Error, 'throws error for corrupt data with zstd magic number (sync)')
+  }
+})
+
+test('compression - data without magic number treated as uncompressed', async (t) => {
+  const source = generateTestData(1024, 'binary')
+  // Data that doesn't start with zstd magic number
+  const invalidUncompressed = b4a.from([0x01, 0x02, 0x03, 0x04, 0x05, 0x06])
+
+  // This should fail because it's not a valid delta, not because of compression
+  try {
+    await delta.apply(source, invalidUncompressed)
+    t.fail('should throw error for invalid delta format')
+  } catch (err) {
+    t.ok(err instanceof Error, 'throws error for invalid delta format (async)')
+  }
+
+  try {
+    delta.applySync(source, invalidUncompressed)
+    t.fail('should throw error for invalid delta format (sync)')
+  } catch (err) {
+    t.ok(err instanceof Error, 'throws error for invalid delta format (sync)')
   }
 })
 
@@ -663,7 +718,7 @@ test('batch apply - large batch with compression', async (t) => {
   }
   
   // Apply all deltas
-  const result = await applyBatch(source, deltas, { compressed: true })
+  const result = await applyBatch(source, deltas)
   
   t.ok(b4a.equals(result, targets[targets.length - 1]), 'batch with compression works')
 })
@@ -689,5 +744,42 @@ test('batch apply - mixed sync and async', async (t) => {
   const syncResult = applyBatchSync(source, [asyncDelta1, asyncDelta2])
   
   t.ok(b4a.equals(syncResult, target2), 'async deltas work with sync batch apply')
+})
+
+test('batch apply - auto-detection of mixed compressed/uncompressed deltas', async (t) => {
+  const source = b4a.from('Initial content. '.repeat(50))
+  const deltas = []
+  
+  let current = source
+  
+  // Create a mix of compressed and uncompressed deltas
+  for (let i = 0; i < 6; i++) {
+    const target = b4a.from(`Modified ${i} content. `.repeat(50))
+    const compressed = i % 2 === 0 // Alternate compression
+    
+    const delta = await create(current, target, { compressed })
+    
+    // Verify magic number presence
+    if (compressed && delta.length >= 4) {
+      t.ok(delta[0] === 0x28 && delta[1] === 0xB5 && 
+           delta[2] === 0x2F && delta[3] === 0xFD, 
+           `delta ${i} has zstd magic number`)
+    } else if (!compressed && delta.length >= 4) {
+      t.ok(!(delta[0] === 0x28 && delta[1] === 0xB5 && 
+             delta[2] === 0x2F && delta[3] === 0xFD), 
+           `delta ${i} does not have zstd magic number`)
+    }
+    
+    deltas.push(delta)
+    current = target
+  }
+  
+  // Apply batch - should auto-detect each delta's compression
+  const result = await applyBatch(source, deltas)
+  t.alike(result, current, 'async batch with mixed compression works')
+  
+  // Test sync version
+  const syncResult = applyBatchSync(source, deltas)
+  t.alike(syncResult, current, 'sync batch with mixed compression works')
 })
 

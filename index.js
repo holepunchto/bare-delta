@@ -23,16 +23,15 @@ async function create(source, target, options = {}) {
 
 /**
  * Applies a binary delta to a source buffer to recreate the target.
+ * Automatically detects if the delta is zstd compressed.
  * 
  * @param {Uint8Array} source - The source/original buffer
  * @param {Uint8Array} delta - The delta buffer created by create()
- * @param {Object} [options] - Optional apply options
- * @param {boolean} [options.compressed=false] - Whether the delta is compressed
  * @returns {Promise<Uint8Array>} A Promise that resolves with the target buffer
  */
-async function apply(source, delta, options = {}) {
+async function apply(source, delta) {
   return new Promise((resolve, reject) => {
-    binding.apply(source, delta, options, (err, result) => {
+    binding.apply(source, delta, (err, result) => {
       if (err) reject(err)
       else resolve(b4a.toBuffer(result))
     })
@@ -57,29 +56,27 @@ function createSync(source, target, options = {}) {
 
 /**
  * Applies a binary delta to a source buffer to recreate the target (synchronous).
+ * Automatically detects if the delta is zstd compressed.
  * 
  * @param {Uint8Array} source - The source/original buffer
  * @param {Uint8Array} delta - The delta buffer created by create()
- * @param {Object} [options] - Optional apply options
- * @param {boolean} [options.compressed=false] - Whether the delta is compressed
  * @returns {Uint8Array} The target buffer
  */
-function applySync(source, delta, options = {}) {
-  return b4a.toBuffer(binding.applySync(source, delta, options))
+function applySync(source, delta) {
+  return b4a.toBuffer(binding.applySync(source, delta))
 }
 
 /**
  * Applies multiple binary deltas sequentially to a source buffer.
+ * Automatically detects if each delta is zstd compressed.
  * 
  * @param {Uint8Array} source - The source/original buffer
  * @param {Uint8Array[]} deltas - Array of delta buffers to apply in sequence
- * @param {Object} [options] - Optional apply options
- * @param {boolean} [options.compressed=false] - Whether ALL deltas are compressed
  * @returns {Promise<Uint8Array>} A Promise that resolves with the final target buffer
  */
-async function applyBatch(source, deltas, options = {}) {
+async function applyBatch(source, deltas) {
   return new Promise((resolve, reject) => {
-    binding.applyBatch(source, deltas, options, (err, result) => {
+    binding.applyBatch(source, deltas, (err, result) => {
       if (err) reject(err)
       else resolve(b4a.toBuffer(result))
     })
@@ -88,15 +85,14 @@ async function applyBatch(source, deltas, options = {}) {
 
 /**
  * Applies multiple binary deltas sequentially to a source buffer (synchronous).
+ * Automatically detects if each delta is zstd compressed.
  * 
  * @param {Uint8Array} source - The source/original buffer
  * @param {Uint8Array[]} deltas - Array of delta buffers to apply in sequence
- * @param {Object} [options] - Optional apply options
- * @param {boolean} [options.compressed=false] - Whether ALL deltas are compressed
  * @returns {Uint8Array} The final target buffer
  */
-function applyBatchSync(source, deltas, options = {}) {
-  return b4a.toBuffer(binding.applyBatchSync(source, deltas, options))
+function applyBatchSync(source, deltas) {
+  return b4a.toBuffer(binding.applyBatchSync(source, deltas))
 }
 
 module.exports = {

@@ -52,9 +52,9 @@ extract_buffer(js_env_t *env, js_value_t *value, void **data, size_t *len, const
   return result;
 }
 
-// Parse delta options from JavaScript object
+// Parse delta creation options from JavaScript object
 static void
-parse_delta_options(js_env_t *env, js_value_t *options, int *nhash, int *searchLimit, int *compressed) {
+parse_create_options(js_env_t *env, js_value_t *options, int *nhash, int *searchLimit, int *compressed) {
   int err;
   js_value_t *prop;
   
@@ -217,18 +217,29 @@ delta_apply_batch_core(const void *source, size_t source_len,
 // Core delta application logic - shared by sync and async
 static int
 delta_apply_core(const void *source, size_t source_len, const void *delta, size_t delta_len,
-                 int compressed, char **result, size_t *result_len) {
+                 int unused_compressed, char **result, size_t *result_len) {
   const char *delta_data = (const char *)delta;
   size_t final_delta_len = delta_len;
   char *decompressed_delta = NULL;
   
-  // Handle decompression if requested
-  if (compressed) {
+  // Auto-detect zstd compression by checking for magic number
+  int is_compressed = 0;
+  if (delta_len >= 4) {
+    // Zstandard magic number: 0xFD2FB528 (little-endian)
+    const unsigned char *bytes = (const unsigned char *)delta;
+    if (bytes[0] == 0x28 && bytes[1] == 0xB5 && 
+        bytes[2] == 0x2F && bytes[3] == 0xFD) {
+      is_compressed = 1;
+    }
+  }
+  
+  // Handle decompression if zstd magic number detected
+  if (is_compressed) {
     unsigned long long decompressed_size = ZSTD_getFrameContentSize(delta_data, delta_len);
     
     if (decompressed_size == ZSTD_CONTENTSIZE_ERROR || 
         decompressed_size == ZSTD_CONTENTSIZE_UNKNOWN) {
-      return -1; // Invalid compressed format
+      return -1; // Invalid compressed format - magic number present but corrupt data
     }
     
     decompressed_delta = (char *)malloc(decompressed_size);
@@ -243,7 +254,7 @@ delta_apply_core(const void *source, size_t source_len, const void *delta, size_
     
     if (ZSTD_isError(actual_size)) {
       free(decompressed_delta);
-      return -3; // Decompression failed
+      return -3; // Decompression failed - magic number present but corrupt data
     }
     
     delta_data = decompressed_delta;
@@ -287,7 +298,7 @@ delta_apply_core(const void *source, size_t source_len, const void *delta, size_
 static int
 delta_apply_batch_core(const void *source, size_t source_len, 
                       void **deltas, size_t *delta_lens, size_t delta_count,
-                      int compressed, char **result, size_t *result_len) {
+                      int unused_compressed, char **result, size_t *result_len) {
   if (delta_count == 0) {
     // No deltas to apply, return copy of source
     char *output = (char *)malloc(source_len);
@@ -300,22 +311,22 @@ delta_apply_batch_core(const void *source, size_t source_len,
     return 0;
   }
   
-  // Apply first delta
+  // Apply first delta (auto-detection handled in delta_apply_core)
   char *current_result;
   size_t current_len;
   int err = delta_apply_core(source, source_len, deltas[0], delta_lens[0], 
-                             compressed, &current_result, &current_len);
+                             0, &current_result, &current_len);
   if (err != 0) {
     return err;
   }
   
-  // Apply subsequent deltas
+  // Apply subsequent deltas (auto-detection handled in delta_apply_core)
   for (size_t i = 1; i < delta_count; i++) {
     char *next_result;
     size_t next_len;
     
     err = delta_apply_core(current_result, current_len, deltas[i], delta_lens[i],
-                          compressed, &next_result, &next_len);
+                          0, &next_result, &next_len);
     
     free(current_result); // Free intermediate result
     
@@ -508,7 +519,7 @@ bare_delta_create_sync(js_env_t *env, js_callback_info_t *info) {
   
   // Parse options
   int nhash, search_limit, compressed;
-  parse_delta_options(env, argc > 2 ? argv[2] : NULL, &nhash, &search_limit, &compressed);
+  parse_create_options(env, argc > 2 ? argv[2] : NULL, &nhash, &search_limit, &compressed);
   
   // Use core logic
   char *result_data;
@@ -540,13 +551,13 @@ bare_delta_create_sync(js_env_t *env, js_callback_info_t *info) {
 static js_value_t *
 bare_delta_apply_sync(js_env_t *env, js_callback_info_t *info) {
   int err;
-  size_t argc = 3;
-  js_value_t *argv[3];
+  size_t argc = 2;
+  js_value_t *argv[2];
   err = js_get_callback_info(env, info, &argc, argv, NULL, NULL);
   assert(err == 0);
   
   if (argc < 2) {
-    js_throw_error(env, NULL, "delta.applySync requires at least 2 arguments (source, delta[, options])");
+    js_throw_error(env, NULL, "delta.applySync requires 2 arguments (source, delta)");
     return NULL;
   }
   
@@ -559,15 +570,11 @@ bare_delta_apply_sync(js_env_t *env, js_callback_info_t *info) {
     return NULL;
   }
   
-  // Parse options
-  int nhash, search_limit, compressed;
-  parse_delta_options(env, argc > 2 ? argv[2] : NULL, &nhash, &search_limit, &compressed);
-  
-  // Use core logic
+  // Use core logic (auto-detection handled internally)
   char *result_data;
   size_t result_len;
   int result_code = delta_apply_core(source_data, source_len, delta_data, delta_len,
-                                     compressed, &result_data, &result_len);
+                                     0, &result_data, &result_len);
   
   if (result_code != 0) {
     js_throw_error(env, NULL, "Failed to apply delta");
@@ -640,10 +647,10 @@ bare_delta_create_async(js_env_t *env, js_callback_info_t *info) {
   // Parse options and store callback
   js_value_t *callback;
   if (argc == 4) {
-    parse_delta_options(env, argv[2], &request->nhash, &request->search_limit, &request->compressed);
+    parse_create_options(env, argv[2], &request->nhash, &request->search_limit, &request->compressed);
     callback = argv[3];
   } else {
-    parse_delta_options(env, NULL, &request->nhash, &request->search_limit, &request->compressed);
+    parse_create_options(env, NULL, &request->nhash, &request->search_limit, &request->compressed);
     callback = argv[2];
   }
   
@@ -672,14 +679,14 @@ bare_delta_create_async(js_env_t *env, js_callback_info_t *info) {
 static js_value_t *
 bare_delta_apply_async(js_env_t *env, js_callback_info_t *info) {
   int err;
-  size_t argc = 4;
-  js_value_t *argv[4];
+  size_t argc = 3;
+  js_value_t *argv[3];
   js_value_t *ctx;
   err = js_get_callback_info(env, info, &argc, argv, &ctx, NULL);
   assert(err == 0);
   
   if (argc < 3) {
-    js_throw_error(env, NULL, "delta.apply requires at least 3 arguments (source, delta, [options,] callback)");
+    js_throw_error(env, NULL, "delta.apply requires 3 arguments (source, delta, callback)");
     return NULL;
   }
   
@@ -689,6 +696,7 @@ bare_delta_apply_async(js_env_t *env, js_callback_info_t *info) {
   
   request->env = env;
   request->is_apply = 1;
+  request->compressed = 0; // Auto-detection in core
   
   // Extract buffers and create references (no copying)
   if (extract_buffer_with_ref(env, argv[0], "source", &request->buf1, &request->len1, &request->source_ref) != 0 ||
@@ -698,15 +706,8 @@ bare_delta_apply_async(js_env_t *env, js_callback_info_t *info) {
     return NULL;
   }
   
-  // Parse options and store callback
-  js_value_t *callback;
-  if (argc == 4) {
-    parse_delta_options(env, argv[2], &request->nhash, &request->search_limit, &request->compressed);
-    callback = argv[3];
-  } else {
-    parse_delta_options(env, NULL, &request->nhash, &request->search_limit, &request->compressed);
-    callback = argv[2];
-  }
+  // Store callback
+  js_value_t *callback = argv[2];
   
   // Store callback reference
   err = js_create_reference(env, callback, 1, &request->callback);
@@ -733,13 +734,13 @@ bare_delta_apply_async(js_env_t *env, js_callback_info_t *info) {
 static js_value_t *
 bare_delta_apply_batch_sync(js_env_t *env, js_callback_info_t *info) {
   int err;
-  size_t argc = 3;
-  js_value_t *argv[3];
+  size_t argc = 2;
+  js_value_t *argv[2];
   err = js_get_callback_info(env, info, &argc, argv, NULL, NULL);
   assert(err == 0);
   
   if (argc < 2) {
-    js_throw_error(env, NULL, "delta.applyBatchSync requires at least 2 arguments (source, deltas[, options])");
+    js_throw_error(env, NULL, "delta.applyBatchSync requires 2 arguments (source, deltas)");
     return NULL;
   }
   
@@ -764,10 +765,6 @@ bare_delta_apply_batch_sync(js_env_t *env, js_callback_info_t *info) {
   err = js_get_array_length(env, argv[1], &delta_count);
   assert(err == 0);
   
-  // Parse options
-  int nhash, search_limit, compressed;
-  parse_delta_options(env, argc > 2 ? argv[2] : NULL, &nhash, &search_limit, &compressed);
-  
   // Extract all deltas
   void **deltas = malloc(sizeof(void *) * delta_count);
   size_t *delta_lens = malloc(sizeof(size_t) * delta_count);
@@ -791,11 +788,11 @@ bare_delta_apply_batch_sync(js_env_t *env, js_callback_info_t *info) {
     }
   }
   
-  // Use core batch logic
+  // Use core batch logic (auto-detection handled internally)
   char *result_data;
   size_t result_len;
   int result_code = delta_apply_batch_core(source_data, source_len, deltas, delta_lens, delta_count,
-                                           compressed, &result_data, &result_len);
+                                           0, &result_data, &result_len);
   
   free(deltas);
   free(delta_lens);
@@ -824,14 +821,14 @@ bare_delta_apply_batch_sync(js_env_t *env, js_callback_info_t *info) {
 static js_value_t *
 bare_delta_apply_batch_async(js_env_t *env, js_callback_info_t *info) {
   int err;
-  size_t argc = 4;
-  js_value_t *argv[4];
+  size_t argc = 3;
+  js_value_t *argv[3];
   js_value_t *ctx;
   err = js_get_callback_info(env, info, &argc, argv, &ctx, NULL);
   assert(err == 0);
   
   if (argc < 3) {
-    js_throw_error(env, NULL, "delta.applyBatch requires at least 3 arguments (source, deltas, [options,] callback)");
+    js_throw_error(env, NULL, "delta.applyBatch requires 3 arguments (source, deltas, callback)");
     return NULL;
   }
   
@@ -902,15 +899,9 @@ bare_delta_apply_batch_async(js_env_t *env, js_callback_info_t *info) {
     }
   }
   
-  // Parse options and store callback  
-  js_value_t *callback;
-  if (argc == 4) {
-    parse_delta_options(env, argv[2], &request->nhash, &request->search_limit, &request->compressed);
-    callback = argv[3];
-  } else {
-    parse_delta_options(env, NULL, &request->nhash, &request->search_limit, &request->compressed);
-    callback = argv[2];
-  }
+  // Store callback (no options needed for apply operations)
+  js_value_t *callback = argv[2];
+  request->compressed = 0; // Auto-detection in core
   
   // Store callback reference
   err = js_create_reference(env, callback, 1, &request->callback);
