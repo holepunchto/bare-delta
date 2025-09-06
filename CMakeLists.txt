@@ -5,45 +5,63 @@ find_package(cmake-fetch REQUIRED PATHS node_modules/cmake-fetch)
 
 project(bare_delta C ASM)
 
-# Fetch libcompact for modern uint encoding
-fetch_package("github:holepunchto/libcompact" SOURCE_DIR libcompact_source)
-fetch_package("github:holepunchto/libsimdle" SOURCE_DIR libsimdle_source)
+fetch_package("github:holepunchto/libcompact")
+fetch_package("github:holepunchto/libsimdle")
 fetch_package("github:facebook/zstd#v1.5.7" SOURCE_DIR zstd_source)
 
-# Create the bare module
-add_bare_module(bare_delta)
-
-# Enable assembly language support for the bare module
-enable_language(ASM)
-
-# Collect dependency source files using glob patterns
-file(GLOB libcompact_sources ${libcompact_source}/src/*.c)
 file(GLOB zstd_common_sources ${zstd_source}/lib/common/*.c)
 file(GLOB zstd_compress_sources ${zstd_source}/lib/compress/*.c)  
 file(GLOB zstd_decompress_sources ${zstd_source}/lib/decompress/*.c)
 file(GLOB zstd_assembly_sources ${zstd_source}/lib/decompress/*.S)
 
-# Add our binding source, delta source, and dependency sources
+add_library(zstd STATIC)
+
 target_sources(
-  ${bare_delta}
+  zstd
   PRIVATE
-    binding.c
-    delta.c
-    ${libcompact_sources}
-    ${libsimdle_source}/src/extern.c
     ${zstd_common_sources}
     ${zstd_compress_sources}
     ${zstd_decompress_sources}
     ${zstd_assembly_sources}
 )
 
+add_library(delta STATIC)
 
-# Include directories for libcompact, libsimdle, zstd, and libutf headers
+target_sources(
+  delta
+  PRIVATE
+    delta.c
+)
+
+target_link_libraries(
+  delta
+  PUBLIC
+    compact
+    simdle
+)
+
+add_bare_module(bare_delta)
+
+target_sources(
+  ${bare_delta}
+  PRIVATE
+    binding.c
+)
+
 target_include_directories(
   ${bare_delta}
   PRIVATE
-    ${libcompact_source}/include
-    ${libsimdle_source}/include
     ${zstd_source}/lib
-    build/_deps/github+holepunchto+libutf-src/include
+)
+
+target_link_libraries(
+  ${bare_delta}
+  PRIVATE
+    $<TARGET_OBJECTS:simdle>
+    $<TARGET_OBJECTS:compact>
+  PUBLIC
+    simdle
+    compact
+    zstd
+    delta
 )
