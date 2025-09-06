@@ -43,25 +43,21 @@ Creates a binary patch between two buffers.
 
 Returns a `Promise<Buffer>` containing the patch.
 
-### `apply(original, patch[, options])`
+### `apply(original, patch)`
 
-Applies a binary patch to reconstruct the modified data.
+Applies a binary patch to reconstruct the modified data. Automatically detects if the patch is compressed.
 
 - `original` - Original data (Buffer or Uint8Array)
 - `patch` - Patch created by `create()` (Buffer or Uint8Array)
-- `options` - Optional apply options
-  - `compressed` - Whether the patch is compressed (default: false)
 
 Returns a `Promise<Buffer>` containing the result.
 
-### `applyBatch(original, patches[, options])`
+### `applyBatch(original, patches)`
 
-Applies multiple binary patches sequentially to reconstruct the final result.
+Applies multiple binary patches sequentially to reconstruct the final result. Automatically detects if each patch is compressed.
 
 - `original` - Original data (Buffer or Uint8Array)
 - `patches` - Array of patches to apply in order (Array of Buffer or Uint8Array)
-- `options` - Optional apply options
-  - `compressed` - Whether all patches are compressed (default: false)
 
 Returns a `Promise<Buffer>` containing the result.
 
@@ -76,23 +72,19 @@ Synchronous version of `create()`. Returns a `Buffer` directly.
   - `searchDepth` - Maximum search depth for matches (default: 250)
   - `compressed` - Whether to compress the patch (default: false)
 
-### `applySync(original, patch[, options])`
+### `applySync(original, patch)`
 
-Synchronous version of `apply()`. Returns a `Buffer` directly.
+Synchronous version of `apply()`. Returns a `Buffer` directly. Automatically detects if the patch is compressed.
 
 - `original` - Original data (Buffer or Uint8Array)
 - `patch` - Patch created by `create()` (Buffer or Uint8Array)
-- `options` - Optional apply options
-  - `compressed` - Whether the patch is compressed (default: false)
 
-### `applyBatchSync(original, patches[, options])`
+### `applyBatchSync(original, patches)`
 
-Synchronous version of `applyBatch()`. Returns a `Buffer` directly.
+Synchronous version of `applyBatch()`. Returns a `Buffer` directly. Automatically detects if each patch is compressed.
 
 - `original` - Original data (Buffer or Uint8Array)
 - `patches` - Array of patches to apply in order (Array of Buffer or Uint8Array)
-- `options` - Optional apply options
-  - `compressed` - Whether all patches are compressed (default: false)
 
 ## Algorithm Enhancements
 
